@@ -7,6 +7,8 @@ interface Bookmark {
   id: number;
   title: string;
   url: string;
+  user_id: string;
+  created_at: string;
 }
 
 export default function Home() {
@@ -16,23 +18,47 @@ export default function Home() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Auth state
+  // -------------------------------
+  // 1️⃣ Handle auth and session
+  // -------------------------------
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setUser(data.session?.user ?? null));
-    supabase.auth.onAuthStateChange((_event, session) => {
+    // Check current session on load
+    const getSession = async () => {
+      const { data } = await supabase.auth.getSession();
+      setUser(data.session?.user ?? null);
+      if (data.session?.user) fetchBookmarks(data.session.user.id);
+    };
+    getSession();
+
+    // Listen to login/logout events
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) fetchBookmarks(session.user.id);
       else setBookmarks([]);
     });
+
+    return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Google login/logout
+  // -------------------------------
+  // 2️⃣ Google login / logout
+  // -------------------------------
   const signInWithGoogle = async () => {
-    await supabase.auth.signInWithOAuth({ provider: "google" });
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin } // important for Vercel
+    });
+    if (error) console.error("Login error:", error.message);
   };
-  const signOut = async () => await supabase.auth.signOut();
 
-  // Fetch bookmarks
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) console.error("Logout error:", error.message);
+  };
+
+  // -------------------------------
+  // 3️⃣ Fetch bookmarks for user
+  // -------------------------------
   const fetchBookmarks = async (userId: string) => {
     const { data } = await supabase
       .from("bookmarks")
@@ -42,41 +68,64 @@ export default function Home() {
     setBookmarks(data || []);
   };
 
-  // Real-time subscription
+  // -------------------------------
+  // 4️⃣ Real-time subscription
+  // -------------------------------
   useEffect(() => {
     if (!user) return;
+
     const channel = supabase
       .channel(`user-bookmarks-${user.id}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "bookmarks", filter: `user_id=eq.${user.id}` },
-        () => fetchBookmarks(user.id)
+        (payload) => {
+          setBookmarks((prev) => {
+            switch (payload.eventType) {
+              case "INSERT":
+                return [payload.new, ...prev];
+              case "UPDATE":
+                return prev.map((b) => (b.id === payload.new.id ? payload.new : b));
+              case "DELETE":
+                return prev.filter((b) => b.id !== payload.old.id);
+              default:
+                return prev;
+            }
+          });
+        }
       )
       .subscribe();
 
     return () => supabase.removeChannel(channel);
   }, [user]);
 
-  // Add bookmark
+  // -------------------------------
+  // 5️⃣ Add / delete bookmarks
+  // -------------------------------
   const addBookmark = async () => {
-    if (!title || !url) return;
+    if (!title || !url || !user) return;
     setLoading(true);
     await supabase.from("bookmarks").insert([{ title, url, user_id: user.id }]);
-    setTitle(""); setUrl("");
+    setTitle("");
+    setUrl("");
     setLoading(false);
   };
 
-  // Delete bookmark
   const deleteBookmark = async (id: number) => {
+    if (!user) return;
     await supabase.from("bookmarks").delete().eq("id", id).eq("user_id", user.id);
+    setBookmarks((prev) => prev.filter((b) => b.id !== id)); // instant update
   };
 
+  // -------------------------------
+  // 6️⃣ Render login page if not signed in
+  // -------------------------------
   if (!user) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-100">
+      <div className="flex min-h-screen items-center justify-center bg-gray-100 dark:bg-gray-900">
         <button
           onClick={signInWithGoogle}
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          className="px-6 py-3 bg-blue-600 text-white rounded hover:bg-blue-700"
         >
           Sign in with Google
         </button>
@@ -84,9 +133,13 @@ export default function Home() {
     );
   }
 
+  // -------------------------------
+  // 7️⃣ Render main bookmark page
+  // -------------------------------
   return (
     <main className="flex flex-col items-center justify-start min-h-screen p-10 bg-gray-50 dark:bg-gray-900 text-black dark:text-white">
       <div className="w-full max-w-md bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+        {/* Header */}
         <div className="flex justify-between items-center mb-4">
           <h1 className="text-2xl font-bold">Bookmarks</h1>
           <button
@@ -120,13 +173,20 @@ export default function Home() {
 
         {/* Bookmark List */}
         <div className="space-y-2">
-          {bookmarks.length === 0 && <p className="text-gray-500 dark:text-gray-400">No bookmarks yet.</p>}
+          {bookmarks.length === 0 && (
+            <p className="text-gray-500 dark:text-gray-400">No bookmarks yet.</p>
+          )}
           {bookmarks.map((b) => (
             <div
               key={b.id}
               className="flex justify-between items-center bg-gray-100 dark:bg-gray-700 p-2 rounded"
             >
-              <a href={b.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400">
+              <a
+                href={b.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400"
+              >
                 {b.title}
               </a>
               <button
